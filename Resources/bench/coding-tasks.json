@@ -1,0 +1,77 @@
+{
+ "source": "~/Developer/model-bench hard_code.py + harder_code.py (9 Oct 2026)",
+ "tasks": [
+  {
+   "set": "hard",
+   "name": "calc",
+   "prompt": "Write a Python function `calc(expr: str) -> float` that evaluates an arithmetic expression with + - * / and parentheses, correct operator precedence, unary minus (e.g. '-(2+3)', '2*-3') and arbitrary whitespace. Do NOT use eval, exec or ast.",
+   "tests": "assert calc('1 + 2 * 3') == 7\nassert calc('(1+2)*3') == 9\nassert calc('-(2+3)') == -5\nassert calc('2*-3') == -6\nassert calc(' 10 / 4 ') == 2.5\nassert calc('2-3-4') == -5\nassert calc('8/2/2') == 2\nassert calc('-2*-(3-(4+1))') == -4\nassert calc('--3') == 3"
+  },
+  {
+   "set": "hard",
+   "name": "regex",
+   "prompt": "Write a Python function `is_match(s: str, p: str) -> bool` implementing regular-expression matching with '.' (any single char) and '*' (zero or more of the preceding element). The match must cover the entire string. Do not use the re module.",
+   "tests": "assert is_match('aa','a') is False\nassert is_match('aa','a*') is True\nassert is_match('ab','.*') is True\nassert is_match('aab','c*a*b') is True\nassert is_match('mississippi','mis*is*p*.') is False\nassert is_match('','a*b*') is True\nassert is_match('abcd','d*') is False"
+  },
+  {
+   "set": "hard",
+   "name": "topo",
+   "prompt": "Write a Python function `build_order(deps: dict[str, list[str]]) -> list[str] | None` where deps maps each package to the packages it depends on. Return an order in which every package appears after all its dependencies (include packages that only appear as dependencies). When several packages are ready at once, pick them in alphabetical order. Return None if there is a cycle.",
+   "tests": "assert build_order({'a':['b'],'b':['c'],'c':[]}) == ['c','b','a']\nassert build_order({'app':['lib','util'],'lib':['util']}) == ['util','lib','app']\nassert build_order({'x':['y'],'y':['x']}) is None\nassert build_order({'b':[],'a':[]}) == ['a','b']\nassert build_order({'a':['a']}) is None\nassert build_order({'d':['b','c'],'b':['a'],'c':['a']}) == ['a','b','c','d']"
+  },
+  {
+   "set": "hard",
+   "name": "intervals",
+   "prompt": "Write a Python class `RangeSet` with `add(lo: int, hi: int)` (adds the half-open range [lo, hi)), `remove(lo: int, hi: int)` (removes [lo, hi)), `contains(x: int) -> bool`, and `ranges() -> list[tuple[int,int]]` returning the disjoint, merged, sorted ranges. Adjacent ranges like [1,3) and [3,5) must merge.",
+   "tests": "r=RangeSet()\nr.add(1,3);r.add(3,5)\nassert r.ranges()==[(1,5)]\nr.add(10,20);r.remove(12,15)\nassert r.ranges()==[(1,5),(10,12),(15,20)]\nassert r.contains(11) and not r.contains(12) and r.contains(15) and not r.contains(20)\nr.remove(0,100)\nassert r.ranges()==[]\nr.add(5,8);r.add(1,2);r.add(2,5)\nassert r.ranges()==[(1,8)]\nr.remove(3,3)\nassert r.ranges()==[(1,8)]"
+  },
+  {
+   "set": "hard",
+   "name": "duration",
+   "prompt": "Write a Python function `parse_duration(s: str) -> int` returning total seconds for strings like '1h30m', '2d 4h', '45s', '1h 0m 5s', '90m' (units d, h, m, s; optional spaces; units may appear in any order but each at most once). Raise ValueError for invalid input such as '', 'abc', '5', '1h1h', '1x'.",
+   "tests": "assert parse_duration('1h30m')==5400\nassert parse_duration('2d 4h')==187200\nassert parse_duration('45s')==45\nassert parse_duration('1h 0m 5s')==3605\nassert parse_duration('90m')==5400\nassert parse_duration('5s 1m')==65\nfor bad in ['', 'abc', '5', '1h1h', '1x', 'h']:\n    try:\n        parse_duration(bad)\n        raise SystemExit('no error for '+repr(bad))\n    except ValueError:\n        pass"
+  },
+  {
+   "set": "hard",
+   "name": "lfu",
+   "prompt": "Write a Python class `LFUCache` with `__init__(self, capacity: int)`, `get(self, key) -> int` (returns -1 if missing) and `put(self, key, value) -> None`. When over capacity, evict the least frequently used key; break ties by evicting the least recently used among them. get and put both count as a use. Capacity 0 stores nothing.",
+   "tests": "c=LFUCache(2)\nc.put(1,1);c.put(2,2)\nassert c.get(1)==1\nc.put(3,3)\nassert c.get(2)==-1\nassert c.get(3)==3\nc.put(4,4)\nassert c.get(1)==-1\nassert c.get(3)==3 and c.get(4)==4\nz=LFUCache(0)\nz.put(1,1)\nassert z.get(1)==-1"
+  },
+  {
+   "set": "harder",
+   "name": "json_parse",
+   "prompt": "Write a Python function `json_parse(s: str)` that parses a JSON document WITHOUT using the json module, eval, or ast. Support objects, arrays, strings with escapes (\\\" \\\\ \\/ \\b \\f \\n \\r \\t and \\uXXXX including surrogate pairs), integers, floats with fractions and exponents, negative numbers, true, false, null, and arbitrary whitespace. Return Python dict/list/str/int/float/bool/None (integers without fraction or exponent must be int). Raise ValueError on any invalid input, including trailing garbage, trailing commas, leading zeros like 01, single quotes, and unterminated strings.",
+   "tests": "import json as _j\ngood = ['{\"a\": [1, 2.5, -3e2, true, false, null], \"b\": {\"c\": \"x\\\\ny\"}}', '[]', '{}', '  42 ', '-0.5E-3',\n        '\"\\\\u00e9\\\\ud83d\\\\ude00\"', '[[[]]]', '{\"k\":\"\\\\\"q\\\\\" \\\\\\\\ \\\\/ \\\\t\"}', '0', '[1e5, 1E+2, 10]']\nfor g in good:\n    assert json_parse(g) == _j.loads(g), g\n    assert type(json_parse(g)) == type(_j.loads(g)), g\nassert type(json_parse('10')) is int and type(json_parse('1.0')) is float\nfor bad in ['', '[1,]', '{\"a\":1,}', '01', \"'x'\", '\"abc', '[1 2]', '{\"a\" 1}', 'tru', '1 2', '{1:2}', '-', '1.', '.5', '[', '\"\\\\x\"']:\n    try:\n        json_parse(bad); raise SystemExit('accepted invalid: ' + repr(bad))\n    except ValueError:\n        pass"
+  },
+  {
+   "set": "harder",
+   "name": "text_justify",
+   "prompt": "Write a Python function `justify(words: list[str], width: int) -> list[str]` that formats words into lines of exactly `width` characters, fully justified: pack as many words per line as fit (one space minimum between words), distribute extra spaces as evenly as possible, with extra spaces going to the leftmost gaps first. The last line, and any line containing a single word, is left-justified and padded with spaces on the right.",
+   "tests": "assert justify([\"This\",\"is\",\"an\",\"example\",\"of\",\"text\",\"justification.\"],16) == [\"This    is    an\",\"example  of text\",\"justification.  \"]\nassert justify([\"What\",\"must\",\"be\",\"acknowledgment\",\"shall\",\"be\"],16) == [\"What   must   be\",\"acknowledgment  \",\"shall be        \"]\nassert justify([\"Science\",\"is\",\"what\",\"we\",\"understand\",\"well\",\"enough\",\"to\",\"explain\",\"to\",\"a\",\"computer.\",\"Art\",\"is\",\"everything\",\"else\",\"we\",\"do\"],20) == [\"Science  is  what we\",\"understand      well\",\"enough to explain to\",\"a  computer.  Art is\",\"everything  else  we\",\"do                  \"]\nassert justify([\"a\"],1) == [\"a\"]\nassert justify([\"a\",\"b\",\"c\",\"d\"],3) == [\"a b\",\"c d\"]"
+  },
+  {
+   "set": "harder",
+   "name": "sudoku",
+   "prompt": "Write a Python function `solve_sudoku(puzzle: str) -> str` that takes an 81-character string (row by row, '0' for empty cells) and returns the solved 81-character string. Return None if the puzzle has no solution.",
+   "tests": "assert solve_sudoku('530070000600195000098000060800060003400803001700020006060000280000419005000080079') == '534678912672195348198342567859761423426853791713924856961537284287419635345286179'\nhard = '800000000003600000070090200050007000000045700000100030001000068008500010090000400'\nr = solve_sudoku(hard)\nassert r and all(a == b or a == '0' for a, b in zip(hard, r))\nrows = [r[i*9:i*9+9] for i in range(9)]\nassert all(sorted(x) == list('123456789') for x in rows)\nassert all(sorted(r[c::9]) == list('123456789') for c in range(9))\nassert all(sorted(r[(b//3)*27+(b%3)*3 + i*9 + j] for i in range(3) for j in range(3)) == list('123456789') for b in range(9))\nassert solve_sudoku('11' + '0'*79) is None"
+  },
+  {
+   "set": "harder",
+   "name": "cheapest_flight",
+   "prompt": "Write a Python function `cheapest_price(n: int, flights: list[tuple[int,int,int]], src: int, dst: int, k: int) -> int` returning the cheapest price from src to dst using at most k stops (so at most k+1 flights), or -1 if impossible. flights are (from, to, price).",
+   "tests": "assert cheapest_price(4, [(0,1,100),(1,2,100),(2,0,100),(1,3,600),(2,3,200)], 0, 3, 1) == 700\nassert cheapest_price(3, [(0,1,100),(1,2,100),(0,2,500)], 0, 2, 1) == 200\nassert cheapest_price(3, [(0,1,100),(1,2,100),(0,2,500)], 0, 2, 0) == 500\nassert cheapest_price(3, [(0,1,100)], 0, 2, 5) == -1\nassert cheapest_price(5, [(0,1,5),(1,2,5),(0,3,2),(3,1,2),(1,4,1),(4,2,1)], 0, 2, 2) == 7\nassert cheapest_price(4, [(0,1,1),(0,2,5),(1,2,1),(2,3,1)], 0, 3, 1) == 6"
+  },
+  {
+   "set": "harder",
+   "name": "min_window",
+   "prompt": "Write a Python function `min_window(s: str, t: str) -> str` returning the shortest substring of s that contains every character of t including duplicates. If several are equally short, return the leftmost. Return '' if none exists or t is empty. Must run in linear time.",
+   "tests": "assert min_window('ADOBECODEBANC','ABC') == 'BANC'\nassert min_window('a','a') == 'a'\nassert min_window('a','aa') == ''\nassert min_window('aaflslflsldkalskaaa','aaa') == 'aaa'\nassert min_window('abcabdebac','cda') == 'cabd'\nassert min_window('xyz','') == ''\nimport time as _t\nbig = 'a'*200000 + 'b' + 'a'*200000 + 'c'\nt0=_t.time(); assert min_window(big,'bc') == 'b' + 'a'*200000 + 'c'; assert _t.time()-t0 < 3, 'too slow'"
+  },
+  {
+   "set": "harder",
+   "name": "median_stream",
+   "prompt": "Write a Python class `MedianFinder` with `add(num: int) -> None` and `median() -> float` that keeps the running median of a stream. Both operations must be O(log n). median() of an empty stream raises ValueError.",
+   "tests": "m = MedianFinder()\ntry:\n    m.median(); raise SystemExit('no error on empty')\nexcept ValueError:\n    pass\nimport random as _r, statistics as _s, time as _t\n_r.seed(7); xs=[]\nfor _ in range(2000):\n    v=_r.randint(-1000,1000); xs.append(v); m.add(v)\n    assert abs(m.median() - _s.median(xs)) < 1e-9\nm2=MedianFinder(); t0=_t.time()\nfor i in range(200000): m2.add(i)\nassert m2.median() == 99999.5 and _t.time()-t0 < 3, 'too slow'"
+  }
+ ]
+}

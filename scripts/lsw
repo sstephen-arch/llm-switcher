@@ -1,0 +1,174 @@
+#!/bin/zsh
+# lsw: LLM Switcher from the terminal. Talks to the app's gateway on this Mac (127.0.0.1:11436),
+# which knows every engine (oMLX, Splash, Ollama, LM Studio, llama.cpp), their ports and the
+# Claude slot picks, and starts an engine when it's needed.
+#
+#   lsw status                  engines, which one Claude uses, slot picks
+#   lsw models                  every model, by engine
+#   lsw use <engine>            show/use that engine (live at once unless Claude Desktop is local)
+#   lsw start|stop <engine>     start or stop an engine
+#   lsw claude [slot] [args]    Claude Code on a local model (slot: sonnet, opus, fable, haiku,
+#                               sonnet46; default sonnet). Lean setup, as claude-omlx was.
+#   lsw codex [model] [args]    Codex on a local model (default: the Sonnet slot's model)
+#   lsw tune <model|slot>       the model's published recommended settings (apply in the app)
+#   lsw bench <model|slot> [hard|all|none] [default|off|low|medium|high]
+#                               speed, tool call and coding benchmark (results also in the app)
+#
+# Installed by LLM Switcher's release script; claude-omlx is now a shortcut to `lsw claude`.
+
+GATEWAY="http://127.0.0.1:11436"
+
+gw_up() { curl -s -m 2 -o /dev/null "$GATEWAY/health"; }
+need_gateway() {
+  gw_up && return
+  open -g -a "LLM Switcher"
+  for i in {1..20}; do sleep 1; gw_up && return; done
+  echo "❌ LLM Switcher isn't running. Open it from Applications." >&2; exit 1
+}
+# POST a control call; prints the JSON reply, fails on an HTTP error.
+ctl() {
+  local out code
+  out=$(curl -s -m "${3:-30}" -w '\n%{http_code}' -X POST "$GATEWAY/local/$1" -H 'content-type: application/json' -d "$2")
+  code=${out##*$'\n'}; out=${out%$'\n'*}
+  print -r -- "$out"
+  [[ $code == 200 ]]
+}
+# {"key": "value"} with the value safely escaped (model names may hold any character).
+jarg() { /usr/bin/python3 -c 'import json,sys; print(json.dumps({sys.argv[1]: sys.argv[2]}))' "$1" "$2"; }
+# Reads a field from JSON on stdin: jget engine / jget 'slots.claude-sonnet-5'
+jget() { /usr/bin/python3 -c 'import sys,json
+v=json.load(sys.stdin)
+for k in sys.argv[1].split("."): v=(v or {}).get(k) if isinstance(v,dict) else None
+print("" if v is None else v)' "$1"; }
+
+slot_id() {
+  case "$1" in
+    opus) echo claude-opus-5 ;; fable) echo claude-fable-5 ;; haiku) echo claude-haiku-4-5-20251001 ;;
+    sonnet46) echo claude-sonnet-4-6 ;; sonnet|"") echo claude-sonnet-5 ;; *) return 1 ;;
+  esac
+}
+
+# Makes sure the engine behind a slot or model is running (a first start can take a while).
+ensure() {
+  local reply
+  echo "… making sure $1 is ready" >&2
+  reply=$(ctl ensure "$(jarg model "$1")" 7200) || { echo "❌ $(print -r -- "$reply" | jget error)" >&2; exit 1; }
+}
+
+cmd=$1; [[ $# -gt 0 ]] && shift
+case "$cmd" in
+  status|"")
+    need_gateway
+    curl -s -m 30 "$GATEWAY/local/status" | /usr/bin/python3 -c 'import sys,json
+s=json.load(sys.stdin)
+print("Claude Desktop: {claude} · engine for Claude: {engine} · menu shows: {shown}".format(**s))
+for e in s["engines"]:
+    if not e["available"]: continue
+    dot = "●" if e["running"] else "○"
+    print("  {} {:<10} port {:<6} {} models".format(dot, e["label"], e["port"], len(e["models"])))
+print("Slots:")
+for k, v in sorted(s["slots"].items()): print("  {:<28} {}".format(k, v))
+print("Gateway 127.0.0.1:{}".format(s["gateway"]) + (" · sharing on :{}".format(s["sharing"]) if s["sharing"] else ""))'
+    ;;
+  models)
+    need_gateway
+    curl -s -m 30 "$GATEWAY/local/status" | /usr/bin/python3 -c 'import sys,json
+for e in json.load(sys.stdin)["engines"]:
+    names = e.get("installed") or e["models"]
+    if names:
+        print(e["label"] + ("" if e["running"] else "  (stopped: starts when a model is used)"))
+        [print("  " + m) for m in names]'
+    ;;
+  use|start|stop)
+    [[ -n $1 ]] || { echo "usage: lsw $cmd <omlx|splash|ollama|lmstudio|llamacpp>" >&2; exit 2; }
+    need_gateway
+    reply=$(ctl "$cmd" "$(jarg engine "$1")" 600) || { echo "❌ $(print -r -- "$reply" | jget error)" >&2; exit 1; }
+    note=$(print -r -- "$reply" | jget note); [[ -n $note ]] && echo "$note"
+    echo "✓ $cmd $1"
+    ;;
+  claude)
+    if [[ -n $1 ]] && SLOT=$(slot_id "$1"); then shift; else SLOT=claude-sonnet-5; fi
+    need_gateway
+    ensure "$SLOT"
+    RULES=$(mktemp -t lsw-claude-rules)
+    [[ -f "$HOME/.claude/local-model-rules.md" ]] && cat "$HOME/.claude/local-model-rules.md" > "$RULES"
+    for f in AGENTS.md CLAUDE.md; do
+      [[ -f "$f" ]] && { print "\n# Project instructions ($f)\n"; cat "$f"; } >> "$RULES"
+    done
+    # A parent Claude session's variables would otherwise win over ours.
+    for v in ${(k)parameters[(I)(ANTHROPIC_*|CLAUDE_*|CLAUDECODE)]}; do unset $v; done
+    export ANTHROPIC_BASE_URL="$GATEWAY"
+    export ANTHROPIC_API_KEY="llm-switcher"
+    export ANTHROPIC_MODEL="$SLOT"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$SLOT"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$SLOT"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SLOT"
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW=128000
+    export API_TIMEOUT_MS=1800000
+    export CLAUDE_STREAM_IDLE_TIMEOUT_MS=900000
+    export API_FORCE_IDLE_TIMEOUT=0
+    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    MCP=(); [[ -f "$HOME/.claude/local-mcp.json" ]] && MCP=(--strict-mcp-config --mcp-config "$HOME/.claude/local-mcp.json")
+    exec claude --bare \
+      --model "$SLOT" \
+      --settings '{"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}' \
+      "${MCP[@]}" \
+      --disable-slash-commands \
+      --exclude-dynamic-system-prompt-sections \
+      --tools "Bash,Read,Edit,Write,Glob,Grep,TodoWrite" \
+      --append-system-prompt-file "$RULES" \
+      "$@"
+    ;;
+  codex)
+    need_gateway
+    if [[ -n $1 && $1 != -* ]]; then MODEL=$1; shift
+    else MODEL=$(curl -s -m 30 "$GATEWAY/local/status" | jget 'slots.claude-sonnet-5'); fi
+    [[ -n $MODEL ]] || { echo "❌ No model given and nothing on the Sonnet 5 slot. Try: lsw codex <model> (see lsw models)" >&2; exit 1; }
+    ensure "$MODEL"
+    export LSW_KEY="llm-switcher"
+    exec codex \
+      -c "model_providers.lsw={name=\"LLM Switcher\",base_url=\"$GATEWAY/v1\",wire_api=\"responses\",env_key=\"LSW_KEY\"}" \
+      -c model_provider=lsw -m "$MODEL" "$@"
+    ;;
+  tune)
+    [[ -n $1 ]] || { echo "usage: lsw tune <model or slot>" >&2; exit 2; }
+    need_gateway
+    target=$1; s=$(slot_id "$1" 2>/dev/null) && [[ $1 == (sonnet|opus|fable|haiku|sonnet46) ]] && target=$s
+    ctl recommend "$(jarg model "$target")" 60 | /usr/bin/python3 -c 'import sys,json
+r=json.load(sys.stdin)
+if "error" in r: sys.exit("❌ "+r["error"])
+print(r["model"]); b=r.get("base_model"); b and print("  base model: "+b)
+for x in r.get("recommendations", []): print("  {settings}\n    from {source}".format(**x))
+if "note" in r: print("  " + r["note"])
+if "thinking_switch" in r:
+    lv = ", ".join(r.get("thinking_levels") or []) or "none listed"
+    sw = "yes" if r["thinking_switch"] else "no"
+    d = " (default {})".format(r["thinking_default"]) if r.get("thinking_default") else ""
+    print("  thinking switch: {} · levels: {}{}".format(sw, lv, d))
+print("Apply in LLM Switcher: Settings > Models > the model > Recommended settings.")'
+    ;;
+  bench)
+    [[ -n $1 ]] || { echo "usage: lsw bench <model or slot> [hard|all|none] [default|off|low|medium|high]" >&2; exit 2; }
+    need_gateway
+    target=$1; s=$(slot_id "$1" 2>/dev/null) && [[ $1 == (sonnet|opus|fable|haiku|sonnet46) ]] && target=$s
+    args=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "coding": sys.argv[2], "thinking": sys.argv[3]}))' "$target" "${2:-hard}" "${3:-default}")
+    echo "… benchmarking $target (coding: ${2:-hard}, thinking: ${3:-default}); this can take a while"
+    out=$(curl -s -m 14400 -X POST "$GATEWAY/local/bench" -H 'content-type: application/json' -d "$args")
+    print -r -- "$out" | /usr/bin/python3 -c 'import sys,json
+d=json.load(sys.stdin)
+for line in d.get("log", []): print(line)
+if "error" in d: sys.exit("❌ " + d["error"])
+r=d["result"]
+def f(v, n=1): return "–" if v is None else ("{:.%df}" % n).format(v)
+print("\nScorecard: {}".format(r["model"]))
+print("  first word {}s · write {} t/s · read {} t/s{} · 4 at once {} t/s".format(f(r.get("firstWord")), f(r.get("writeSpeed"),0), f(r.get("readSpeed"),0), "" if r.get("readRecall") in (None, True) else " (missed recall)", f(r.get("parallelSpeed"),0)))
+t = r.get("toolCall"); print("  tool call: {}".format("–" if t is None else ("ok" if t else "failed")))
+if r.get("codingTotal"): print("  coding: {}/{}".format(r["codingPassed"], r["codingTotal"]))
+print("  {:.1f} min".format(r["minutes"]))'
+    ;;
+  -h|--help|help)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "lsw: unknown command '$cmd' (lsw help)" >&2; exit 2 ;;
+esac

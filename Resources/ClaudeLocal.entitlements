@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Not sandboxed (Developer ID, outside the App Store): the app must edit Claude Desktop's
+	     settings files and run a loopback gateway. Hardened runtime is on, with no exceptions. -->
+</dict>
+</plist>

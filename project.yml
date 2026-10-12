@@ -1,0 +1,60 @@
+name: ClaudeLocal
+options:
+  bundleIdPrefix: com.depaloconsulting
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+settings:
+  base:
+    MARKETING_VERSION: "1.5.2"
+    CURRENT_PROJECT_VERSION: "22"
+    SWIFT_VERSION: "5.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
+targets:
+  ClaudeLocal:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/ClaudeLocal
+      - Resources
+    settings:
+      base:
+        PRODUCT_NAME: "LLM Switcher"
+        PRODUCT_BUNDLE_IDENTIFIER: com.depaloconsulting.claudelocal
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/ClaudeLocal.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        COMBINE_HIDPI_IMAGES: YES
+    dependencies:
+      - package: Sparkle
+  ClaudeLocalTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/ClaudeLocalTests
+    dependencies:
+      - target: ClaudeLocal
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.depaloconsulting.claudelocal.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/LLM Switcher.app/Contents/MacOS/LLM Switcher"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  ClaudeLocal:
+    build:
+      targets:
+        ClaudeLocal: all
+        ClaudeLocalTests: [test]
+    test:
+      targets:
+        - ClaudeLocalTests

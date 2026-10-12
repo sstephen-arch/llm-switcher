@@ -1,0 +1,5 @@
+// Signing. Put your own Apple team in Config/Local.xcconfig (git-ignored), e.g.:
+//   DEVELOPMENT_TEAM = ABCDE12345
+// or pick your team in Xcode under Signing & Capabilities. Leaving it empty builds for this Mac only.
+DEVELOPMENT_TEAM =
+#include? "Local.xcconfig"
