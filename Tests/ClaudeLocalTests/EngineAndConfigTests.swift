@@ -85,4 +85,15 @@ final class EngineAndConfigTests: XCTestCase {
         XCTAssertFalse(Presets.callerDisabledThinking(["thinking": ["type": "enabled", "budget_tokens": 1024]]))
         XCTAssertFalse(Presets.callerDisabledThinking([:]))
     }
+
+    func testClaudeFormatThinkingLevelAlsoSetsEffort() {
+        var p = ModelPreset()
+        p.thinking = "medium"
+        var payload: [String: Any] = ["model": "m", "max_tokens": 1000, "output_config": ["format": "x"]]
+        Presets.apply(p, to: &payload, path: "/v1/messages")
+        let oc = payload["output_config"] as? [String: Any]
+        XCTAssertEqual(oc?["effort"] as? String, "medium")
+        XCTAssertEqual(oc?["format"] as? String, "x", "other output_config fields are kept")
+        XCTAssertEqual((payload["thinking"] as? [String: Any])?["type"] as? String, "enabled")
+    }
 }

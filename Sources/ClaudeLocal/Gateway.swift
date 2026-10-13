@@ -495,6 +495,11 @@ enum Presets {
                 payload["thinking"] = ["type": "enabled", "budget_tokens": budget]
                 let cur = payload["max_tokens"] as? Int ?? 0
                 if cur <= budget { payload["max_tokens"] = budget + 2048 }   // budget must fit inside the limit
+                // Engines that think in levels (Splash) ignore the budget and read Anthropic's effort,
+                // which defaults to "high"; send the chosen level too.
+                var oc = payload["output_config"] as? [String: Any] ?? [:]
+                oc["effort"] = p.thinking
+                payload["output_config"] = oc
             }
         case "/v1/chat/completions", "/v1/completions":
             payload["reasoning_effort"] = p.thinking == "off" ? "none" : p.thinking

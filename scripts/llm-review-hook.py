@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """LLM Switcher review hook for Claude Code (Stop event).
 
-When a LOCAL Claude Code session (one talking to LLM Switcher on 127.0.0.1:11436) finishes a turn
-that changed files in a git repo, this sends the uncommitted changes to a different model for an
-adversarial review (the Review loop's reviewer, Qwen3.8-Flash-Next on "high" by default), optionally runs
-the project's tests, and, if there are problems, hands them back so the writer fixes them before
-stopping. Up to 3 rounds per request. Cloud sessions are never touched.
+When a LOCAL Claude Code session (one talking to LLM Switcher on 127.0.0.1:11436) finishes a request
+in which it edited files in a git repo, this sends the uncommitted changes for an adversarial review,
+optionally runs the project's tests, and, if there are problems, hands them back so the writer fixes
+them before stopping. Light by default: the session's own model reviews (it's already loaded, so no
+second big model has to load), at medium thinking, one round. Requests that edited nothing are never
+reviewed. Cloud sessions are never touched.
 
 Off switches: LLM_REVIEW=off in the environment, the toggle in LLM Switcher's Review loop tab, or a
 .llm-review.json in the repo with {"enabled": false}.
 
 Per-repo settings, .llm-review.json at the repo root (all optional):
   {"test": "swift test", "test_timeout": 600, "reviewer": "Qwen3.8-Flash-Next-oQ4e-mtp",
-   "effort": "high", "max_rounds": 3, "enabled": true}
+   "effort": "high", "max_rounds": 3, "enabled": true, "review_all": false}
+Defaults: reviewer = the session's model, effort "medium", max_rounds 1, review_all false.
 
 Runs on the macOS system Python (3.9), standard library only.
 """
@@ -49,13 +51,14 @@ def emit(obj):
     return 0
 
 
-FEEDBACK_PREFIXES = ("Stop hook feedback", "An independent reviewer (")
+# This hook's own messages, old wording included, so they're never mistaken for the person's request.
+FEEDBACK_PREFIXES = ("Stop hook feedback", "An independent reviewer (", "A reviewer (")
 
 
 def is_person(text):
     """Text the person typed, not tool output, a system tag or this hook's own feedback."""
     t = text.lstrip()
-    return bool(t) and not t.startswith("<") and not t.startswith(FEEDBACK_PREFIXES) and FEEDBACK_PREFIXES[1] not in t[:300]
+    return bool(t) and not t.startswith("<") and not t.startswith(FEEDBACK_PREFIXES) and not any(f in t[:300] for f in FEEDBACK_PREFIXES[1:])
 
 
 def is_clean(review_text, failures):
@@ -64,29 +67,56 @@ def is_clean(review_text, failures):
     return "NO ISSUES" in review_text.upper() and len(review_text) < 400 and not failures
 
 
-def last_user_prompt(transcript_path):
-    """The latest thing the person typed, as the task the changes are meant to do."""
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+# Shell commands that clearly change files: a redirect into a file (not 2>&1 or /dev/null), in-place
+# edits, file moves/copies/removals, and git commands that rewrite the working tree.
+SHELL_WRITE = re.compile(
+    r"(?<![0-9&<>])>>?\s*(?!&|/dev/null)[^\s|;&]"
+    r"|\bsed\s+(-[a-zA-Z]*\s+)*-i|\bperl\s+-[a-zA-Z]*i|\btee\b|\b(mv|cp|rm|touch|patch|truncate|unzip)\s"
+    r"|\bgit\s+(apply|checkout|restore|reset|am|cherry-pick|revert|merge|rebase|stash\s+pop|mv|rm)\b")
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def _edits(item):
+    if not isinstance(item, dict) or item.get("type") != "tool_use":
+        return False
+    if item.get("name") in EDIT_TOOLS:
+        return True
+    return item.get("name") == "Bash" and bool(SHELL_WRITE.search(str((item.get("input") or {}).get("command", ""))))
+
+
+def read_transcript(transcript_path):
+    """One pass over the session: the person's latest request (the task the changes are meant to do),
+    whether files were changed since it (Edit/Write tools or a shell command that writes), and the model
+    that answered. Without the "changed" check, a turn that edited nothing ("hi") would get a review of
+    whatever was already uncommitted."""
+    out = {"prompt": "", "edited": False, "model": ""}
     if not transcript_path or not os.path.exists(transcript_path):
-        return ""
-    prompt = ""
+        return out
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("type") != "user" or e.get("isMeta"):
-                continue
-            content = (e.get("message") or {}).get("content")
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text = "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
-            else:
-                text = ""
-            if is_person(text):
-                prompt = text.strip()
-    return prompt[:6000]
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if e.get("type") == "user" and not e.get("isMeta"):
+                text = _text(content)
+                if is_person(text):
+                    out["prompt"], out["edited"] = text.strip()[:6000], False     # a new request starts here
+            elif e.get("type") == "assistant":
+                out["model"] = msg.get("model") or out["model"]
+                if isinstance(content, list) and any(_edits(c) for c in content):
+                    out["edited"] = True
+    return out
 
 
 def changes(root):
@@ -177,6 +207,10 @@ def main():
         pass
     if cfg.get("enabled") is False:
         return 0
+    # Only review requests that changed files (set "review_all": true to review any uncommitted diff).
+    tr = read_transcript(data.get("transcript_path"))
+    if not cfg.get("review_all") and not tr["edited"]:
+        return 0
 
     diff = changes(root)
     if not diff.strip():
@@ -192,14 +226,14 @@ def main():
     except (OSError, ValueError):
         state = {}
 
-    task = last_user_prompt(data.get("transcript_path"))
+    task = tr["prompt"]
     task_hash = hashlib.sha256(task.encode()).hexdigest()
     if state.get("task") != task_hash:                    # a new request gets fresh rounds
         state = {"task": task_hash, "rounds": 0, "best_score": -1.0, "best_ref": "", "last_diff": ""}
     diff_hash = hashlib.sha256(diff.encode()).hexdigest()
     if state.get("last_diff") == diff_hash:
         return 0                                          # nothing changed since the last review
-    max_rounds = int(cfg.get("max_rounds", 3))
+    max_rounds = int(cfg.get("max_rounds", 1))
     if state["rounds"] >= max_rounds:
         state["last_diff"] = diff_hash
         json.dump(state, open(state_path, "w"))
@@ -223,8 +257,11 @@ def main():
                        "fix the regression quickly, restore that version with:\n`git restore --source=%s --worktree -- .`"
                        % (state["best_score"] * 100, score * 100, state["best_ref"]))
 
-    reviewer = cfg.get("reviewer") or app_default("loop.reviewer", "Qwen3.8-Flash-Next-oQ4e-mtp")
-    effort = cfg.get("effort") or app_default("loop.reviewerEffort", "high")
+    # Light by default: the session's own model (already loaded, so no second big model has to
+    # load) at medium thinking. .llm-review.json can name another reviewer or effort.
+    reviewer = (cfg.get("reviewer") or tr["model"] or os.environ.get("ANTHROPIC_MODEL")
+                or app_default("loop.reviewer", "Qwen3.8-Flash-Next-oQ4e-mtp"))
+    effort = cfg.get("effort") or "medium"
     left = HOOK_BUDGET - (time.time() - started)
     if left < 120:
         return emit({"systemMessage": "LLM Switcher review skipped: the tests used up the review's time. Lower test_timeout in .llm-review.json."})
@@ -240,7 +277,7 @@ def main():
     if clean:
         return emit({"systemMessage": "LLM Switcher review (%s, %s): no issues found.%s" % (reviewer, effort, test_note)})
     reason = (
-        "An independent reviewer (%s, %s reasoning) checked your uncommitted changes. Round %d of %d.%s\n\n"
+        "A reviewer (%s, %s reasoning) checked your uncommitted changes. Round %d of %d.%s\n\n"
         "%s%s\n\nREVIEW:\n%s\n\n"
         "Verify each point against the code before changing anything: the reviewer can be wrong, while "
         "failing tests are ground truth. Fix the real problems, then finish. For any point you reject, "
