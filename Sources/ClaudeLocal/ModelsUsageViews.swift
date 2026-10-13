@@ -209,6 +209,7 @@ struct InstalledModelRow: View {
                         else if info.contextLength > 0 { Badge(text: "ctx \(info.contextLength / 1024)k") }
                         if info.pleForcedToSSD { Badge(text: "Part on SSD (slower)", color: .orange) }
                         if !warnings.isEmpty { Badge(text: "\(warnings.count) warning\(warnings.count == 1 ? "" : "s")", color: .orange) }
+                        if state.isTuned(model) == false { Badge(text: "Not tuned", color: .orange) }
                     }
                 }
             }
@@ -321,6 +322,7 @@ struct EngineModelRow: View {
             HStack {
                 Text(model).font(.callout.monospaced()).lineLimit(1)
                 Badge(text: engine.label.uppercased(), color: .blue)
+                if state.isTuned(model) == false { Badge(text: "Not tuned", color: .orange) }
                 Spacer()
                 let slots = Slots.all.filter { state.config.slots[$0.id] == model }.map(\.label)
                 if !slots.isEmpty { Text(slots.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }

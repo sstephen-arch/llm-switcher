@@ -98,13 +98,17 @@ final class UsageStore {
             var search = text[...]
             while let r = search.range(of: "\"\(key)\":") {
                 let rest = search[r.upperBound...].drop { $0 == " " }
-                let digits = rest.prefix { $0.isNumber }
-                best = max(best, Int(digits) ?? 0)
+                // Capped: the numbers come from reply text, and a sum of huge ones must not overflow.
+                let digits = rest.prefix { $0.isNumber }.prefix(15)
+                best = max(best, min(Int(digits) ?? 0, 1 << 40))
                 search = search[r.upperBound...]
             }
             return best
         }
-        let input = max(maxValue("prompt_tokens"), maxValue("input_tokens"))
+        // OpenAI's prompt_tokens includes cached tokens; Anthropic's input_tokens counts only the new
+        // ones, with cache reads and writes reported beside it. Either way: the whole prompt.
+        let anthropic = maxValue("input_tokens") + maxValue("cache_read_input_tokens") + maxValue("cache_creation_input_tokens")
+        let input = max(maxValue("prompt_tokens"), anthropic)
         let output = max(maxValue("completion_tokens"), maxValue("output_tokens"))
         return (input, output)
     }

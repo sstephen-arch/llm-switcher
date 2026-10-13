@@ -47,15 +47,26 @@ struct RequestsView: View {
     @State private var engine = ""
     @State private var model = ""
     @State private var errorsOnly = false
+    @State private var window: TimeInterval = 0     // seconds back; 0 = everything kept
     @State private var confirmClear = false
 
     private var rows: [Gateway.Activity] {
-        state.activity.filter {
-            (engine.isEmpty || $0.engine == engine) && (model.isEmpty || $0.model == model) && (!errorsOnly || $0.status >= 400)
+        let since = window > 0 ? Date().addingTimeInterval(-window) : .distantPast
+        return state.activity.filter {
+            (engine.isEmpty || $0.engine == engine) && (model.isEmpty || $0.model == model)
+                && (!errorsOnly || $0.status >= 400) && $0.date >= since
         }
     }
 
     var body: some View {
+        // Redrawn every minute, so a "Last hour" window drops old rows even when nothing new comes in.
+        TimelineView(.periodic(from: .now, by: 60)) { _ in content }
+            .confirmationDialog("Clear the request history?", isPresented: $confirmClear) {
+                Button("Clear", role: .destructive) { state.clearRequests() }
+            }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Picker("Engine", selection: $engine) {
@@ -66,6 +77,13 @@ struct RequestsView: View {
                     Text("All models").tag("")
                     ForEach(Array(Set(state.activity.map(\.model))).sorted(), id: \.self) { Text($0).tag($0) }
                 }.frame(width: 300)
+                Picker("Since", selection: $window) {
+                    Text("All kept").tag(TimeInterval(0))
+                    Text("Last hour").tag(TimeInterval(3600))
+                    Text("Last 6 hours").tag(TimeInterval(6 * 3600))
+                    Text("Last day").tag(TimeInterval(86400))
+                    Text("Last week").tag(TimeInterval(7 * 86400))
+                }.frame(width: 170)
                 Toggle("Errors only", isOn: $errorsOnly)
                 Spacer()
                 Button("Clear…") { confirmClear = true }
@@ -98,9 +116,6 @@ struct RequestsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding()
-        .confirmationDialog("Clear the request history?", isPresented: $confirmClear) {
-            Button("Clear", role: .destructive) { state.clearRequests() }
-        }
     }
 
     struct Summary: Identifiable {
@@ -118,7 +133,8 @@ struct RequestsView: View {
     private var summaries: [Summary] {
         Dictionary(grouping: rows, by: \.model).map { model, list in
             let input = list.reduce(0) { $0 + $1.inputTokens }
-            let cached = list.reduce(0) { $0 + $1.cachedTokens }
+            // Lines from before 1.5.5 counted cached tokens outside the prompt total: cap at the prompt.
+            let cached = list.reduce(0) { $0 + min($1.cachedTokens, $1.inputTokens) }
             return Summary(model: model, engine: EngineKind(rawValue: list[0].engine)?.label ?? "",
                            count: list.count, errors: list.filter { $0.status >= 400 }.count,
                            firstWord: median(list.compactMap(\.firstWord)), read: median(list.compactMap(\.readSpeed)),

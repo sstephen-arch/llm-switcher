@@ -58,6 +58,11 @@ struct ModelPreset: Codable, Equatable {
 
     init() {}
 
+    /// Sets any sampling value (an untuned model runs on the engine's generic defaults).
+    var hasSampling: Bool {
+        temperature != nil || topP != nil || topK != nil || minP != nil || presencePenalty != nil || repetitionPenalty != nil
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         thinking = (try? c.decode(String.self, forKey: .thinking)) ?? "default"
@@ -187,6 +192,8 @@ struct AppConfig: Codable, Equatable {
     var engineSlots: [String: [String: String]] = [:]
     /// Ollama, LM Studio and llama.cpp settings, by EngineKind raw value.
     var engines: [String: EngineSettings] = [:]
+    /// What to do when a model about to load won't fit beside other engines' loaded models.
+    var memoryGuard: MemoryGuard.Mode = .unload
 
     /// An external engine's settings (defaults, with its usual port, until changed).
     func engine(_ kind: EngineKind) -> EngineSettings {
@@ -219,6 +226,7 @@ struct AppConfig: Codable, Equatable {
         engine = (try? c.decode(EngineKind.self, forKey: .engine)) ?? .omlx
         engineSlots = (try? c.decode([String: [String: String]].self, forKey: .engineSlots)) ?? [:]
         engines = (try? c.decode([String: EngineSettings].self, forKey: .engines)) ?? [:]
+        memoryGuard = (try? c.decode(MemoryGuard.Mode.self, forKey: .memoryGuard)) ?? .unload
     }
 
     /// oMLX's port, from the upstream URL.

@@ -1,0 +1,152 @@
+import XCTest
+@testable import BenchKit
+
+/// The Build Bench's hidden checks (TASK.md). Copied in by the driver at check time only.
+final class HiddenSpecTests: XCTestCase {
+
+    // MARK: INI
+
+    func testINIBasicSectionsAndGlobalKeys() throws {
+        let r = try INI.parse("top = 1\n[a]\nx = 2\n[b]\ny=3")
+        XCTAssertEqual(r, ["": ["top": "1"], "a": ["x": "2"], "b": ["y": "3"]])
+    }
+
+    func testINICommentsBlankLinesAndCRLF() throws {
+        let r = try INI.parse("; c\n# c\n\n   \t\n[s]\r\n  k = v  \r\n  ; indented comment")
+        XCTAssertEqual(r, ["s": ["k": "v"]])
+    }
+
+    func testINIEmptySectionKeptAndMerged() throws {
+        let r = try INI.parse("[empty]\n[a]\nx=1\n[a]\ny=2")
+        XCTAssertEqual(r, ["empty": [:], "a": ["x": "1", "y": "2"]])
+    }
+
+    func testINISplitsAtFirstEqualsAndLastWins() throws {
+        let r = try INI.parse("[s]\nurl = a=b=c\nk = 1\nk = 2")
+        XCTAssertEqual(r["s"], ["url": "a=b=c", "k": "2"])
+    }
+
+    func testINIQuotedValuesAndEscapes() throws {
+        let text = [#"[s]"#, #"q = "  a ; b # c  ""#, #"e = "say \"hi\" \\ done""#, #"short = """#, #"one = """"#]
+            .joined(separator: "\n")
+        let r = try INI.parse(text)
+        XCTAssertEqual(r["s"]?["q"], "  a ; b # c  ")
+        XCTAssertEqual(r["s"]?["e"], #"say "hi" \ done"#)
+        XCTAssertEqual(r["s"]?["short"], "")
+        XCTAssertEqual(r["s"]?["one"], "\"")
+    }
+
+    func testINIInlineComments() throws {
+        let r = try INI.parse("[s]\na = 1 ; one\nb = 2 # two\nc = x;y#z\nd = ;start")
+        XCTAssertEqual(r["s"], ["a": "1", "b": "2", "c": "x;y#z", "d": ";start"])
+    }
+
+    func testINIErrorsCarryLineNumbers() {
+        XCTAssertThrowsError(try INI.parse("[a]\nnot a pair")) { XCTAssertEqual($0 as? INIError, .badLine(2)) }
+        XCTAssertThrowsError(try INI.parse("x=1\n\n[  ]")) { XCTAssertEqual($0 as? INIError, .emptySection(3)) }
+        XCTAssertThrowsError(try INI.parse("[a]\n  = v")) { XCTAssertEqual($0 as? INIError, .emptyKey(2)) }
+    }
+
+    func testINIEmptyText() throws {
+        XCTAssertEqual(try INI.parse(""), [:])
+    }
+
+    // MARK: LRU
+
+    func testLRUEvictsLeastRecentlyUsed() {
+        let c = LRUCache<String, Int>(capacity: 2)
+        c.put("a", 1); c.put("b", 2)
+        XCTAssertEqual(c.get("a"), 1)          // a is now most recent
+        c.put("c", 3)                          // evicts b
+        XCTAssertNil(c.get("b"))
+        XCTAssertEqual(c.keys, ["c", "a"])
+        XCTAssertEqual(c.count, 2)
+    }
+
+    func testLRUUpdateRefreshesAndDoesNotGrow() {
+        let c = LRUCache<Int, String>(capacity: 2)
+        c.put(1, "x"); c.put(2, "y"); c.put(1, "z")
+        XCTAssertEqual(c.count, 2)
+        XCTAssertEqual(c.keys, [1, 2])
+        c.put(3, "w")                          // evicts 2
+        XCTAssertEqual(c.get(1), "z")
+        XCTAssertNil(c.get(2))
+    }
+
+    func testLRUMissChangesNothing() {
+        let c = LRUCache<Int, Int>(capacity: 3)
+        c.put(1, 1); c.put(2, 2)
+        XCTAssertNil(c.get(9))
+        XCTAssertEqual(c.keys, [2, 1])
+    }
+
+    func testLRUZeroAndNegativeCapacity() {
+        for cap in [0, -5] {
+            let c = LRUCache<Int, Int>(capacity: cap)
+            c.put(1, 1)
+            XCTAssertEqual(c.count, 0)
+            XCTAssertNil(c.get(1))
+            XCTAssertEqual(c.keys, [])
+        }
+    }
+
+    func testLRUManyOperations() {
+        let c = LRUCache<Int, Int>(capacity: 100)
+        for i in 0..<10_000 { c.put(i, i * 2) }
+        XCTAssertEqual(c.count, 100)
+        XCTAssertEqual(c.get(9_999), 19_998)
+        XCTAssertNil(c.get(9_899))
+        XCTAssertEqual(c.keys.first, 9_999)
+    }
+
+    // MARK: Expr
+
+    private func ev(_ s: String, _ v: [String: Double] = [:]) throws -> Double { try Expr.evaluate(s, variables: v) }
+
+    func testExprPrecedenceAndAssociativity() throws {
+        XCTAssertEqual(try ev("1 + 2 * 3"), 7)
+        XCTAssertEqual(try ev("(1 + 2) * 3"), 9)
+        XCTAssertEqual(try ev("10 - 4 - 3"), 3)
+        XCTAssertEqual(try ev("2 ^ 3 ^ 2"), 512)
+        XCTAssertEqual(try ev("100 / 10 / 5"), 2)
+        XCTAssertEqual(try ev("7 % 4 * 2"), 6)
+    }
+
+    func testExprUnaryOperators() throws {
+        XCTAssertEqual(try ev("-2 ^ 2"), -4)
+        XCTAssertEqual(try ev("(-2) ^ 2"), 4)
+        XCTAssertEqual(try ev("2 ^ -1"), 0.5)
+        XCTAssertEqual(try ev("--3"), 3)
+        XCTAssertEqual(try ev("+4 - -1"), 5)
+        XCTAssertEqual(try ev("3 * -2"), -6)
+    }
+
+    func testExprDecimalsRemainderAndWhitespace() throws {
+        XCTAssertEqual(try ev("\t2.5 *\t4 "), 10)
+        XCTAssertEqual(try ev("7.5 % 2"), 1.5, accuracy: 1e-12)
+        XCTAssertEqual(try ev("-7 % 3"), -1)
+    }
+
+    func testExprVariables() throws {
+        XCTAssertEqual(try ev("x * 2 + _y1", ["x": 3, "_y1": 0.5]), 6.5)
+        XCTAssertThrowsError(try ev("x + z", ["x": 1])) { XCTAssertEqual($0 as? ExprError, .unknownVariable("z")) }
+    }
+
+    func testExprDivisionByZero() {
+        XCTAssertThrowsError(try ev("1 / 0")) { XCTAssertEqual($0 as? ExprError, .divisionByZero) }
+        XCTAssertThrowsError(try ev("5 % (2 - 2)")) { XCTAssertEqual($0 as? ExprError, .divisionByZero) }
+    }
+
+    func testExprSyntaxErrors() {
+        for bad in ["", "   ", "(1 + 2", "1 + 2)", "1 +", "* 2", "1 2", ".5", "5.", "1.2.3", "2 $ 3", "()", "x y"] {
+            XCTAssertThrowsError(try ev(bad, ["x": 1, "y": 2]), "expected a syntax error for \"\(bad)\"") {
+                XCTAssertEqual($0 as? ExprError, .syntax, "for \"\(bad)\"")
+            }
+        }
+    }
+
+    func testExprDeepNesting() throws {
+        let deep = String(repeating: "(", count: 200) + "1" + String(repeating: ")", count: 200)
+        XCTAssertEqual(try ev(deep), 1)
+    }
+}

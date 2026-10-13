@@ -94,6 +94,8 @@ final class AppState: ObservableObject {
         }
         gateway.ensureEngine = ensure
         shareGateway.ensureEngine = ensure
+        gateway.prepareMemory = { [weak self] target in await self?.prepareMemory(for: target, shared: false) }
+        shareGateway.prepareMemory = { [weak self] target in await self?.prepareMemory(for: target, shared: true) }
         gateway.control = { [weak self] action, args in
             guard let self else { return (503, ["error": "quitting"]) }
             return await self.control(action, args)
@@ -448,6 +450,103 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Whether a model has tuned sampling: an LLM Switcher preset, or (oMLX) oMLX's own per-model
+    /// settings. nil when it can't be told (oMLX not running yet). Untuned models loop and ramble.
+    func isTuned(_ model: String) -> Bool? {
+        if config.presets[model]?.hasSampling == true { return true }
+        guard Engines.kind(of: model) == .omlx else { return false }
+        guard let m = adminModel(model) else { return nil }
+        return m.temperature != nil || m.topP != nil || m.topK != nil || m.minP != nil
+    }
+
+    /// Slot models with no tuned sampling, for the menu's reminder.
+    var untunedSlotModels: [String] {
+        Set(slotPicks(viewEngine).values).filter { !$0.isEmpty && isTuned($0) == false }.sorted()
+    }
+
+    /// When each model last passed the memory check: a model in use isn't re-checked every request.
+    private var memoryChecked: [String: Date] = [:]
+
+    /// Frees other engines' models when `target` isn't loaded and won't fit beside them
+    /// (`MemoryGuard`). Returns why the request can't go ahead, or nil. A computer on the network
+    /// never unloads this Mac's models: for it, the guard only refuses.
+    func prepareMemory(for target: String, shared: Bool) async -> String? {
+        var mode = config.memoryGuard
+        if shared && mode == .unload { mode = .refuse }
+        guard mode != .off, !target.isEmpty else { return nil }
+        let engine = Engines.kind(of: target)
+        guard engine == .omlx || engine == .splash else { return nil }   // other engines' sizes are unknown
+        if let t = memoryChecked[target], Date().timeIntervalSince(t) < 30 { return nil }
+        // A model used in the last 2 minutes counts as busy: two slots on different engines that
+        // don't fit together would otherwise unload each other on every turn.
+        let recent = Date().addingTimeInterval(-120)
+        let usedLately: (String) -> Bool = { [activity] m in activity.contains { $0.model == m && $0.date > recent } }
+        let omlxUp = await OMLX.isRunning(upstream: config.upstream)
+        let omlxModels = omlxUp ? await OMLXAdmin.models(upstream: config.upstream) : []
+        let splashSize: (String) -> Int64 = { [splash] name in
+            splash.cached.first { SplashConfig.servedName($0.repo) == name }?.size ?? 0
+        }
+        var need: Int64 = 0
+        var credit: Int64 = 0       // memory that starting the target frees anyway
+        switch engine {
+        case .omlx:
+            if let m = omlxModels.first(where: { $0.id == target }) {
+                if m.loaded || m.loading { memoryChecked[target] = Date(); return nil }
+                need = m.sizeOnDisk
+            } else {
+                // oMLX isn't running yet (or doesn't list it): the size of its folder is the best guess.
+                need = OMLX.sizeOnDisk(target)
+            }
+        case .splash:
+            if splash.isUp && splash.servedModel == target { memoryChecked[target] = Date(); return nil }
+            need = splashSize(target)
+            // Splash runs one model: switching stops the one it serves now, which frees its memory.
+            if splash.isUp && !splash.servedModel.isEmpty { credit = splashSize(splash.servedModel) }
+        default:
+            return nil
+        }
+        var holders: [MemoryGuard.Holder] = []
+        if engine != .splash, splash.isUp, !splash.servedModel.isEmpty {
+            let running = await Splash.activity(config.splash)?.running ?? 0
+            holders.append(.init(engine: .splash, model: splash.servedModel, bytes: splashSize(splash.servedModel),
+                                 busy: running > 0 || usedLately(splash.servedModel)))
+        }
+        if engine != .omlx {
+            let busy = (await OMLXAdmin.busyRequests(upstream: config.upstream) ?? 0) > 0
+            for m in omlxModels where m.loaded && !m.isHelper {
+                holders.append(.init(engine: .omlx, model: m.id, bytes: m.sizeOnDisk, busy: busy || usedLately(m.id)))
+            }
+        }
+        for (k, e) in externals where k != engine && e.isUp && !e.external {
+            holders.append(.init(engine: k, model: k.label, bytes: 0, busy: false))
+        }
+        let available = MemoryGuard.availableBytes() + credit
+        switch MemoryGuard.decide(target: target, need: need, available: available, holders: holders, mode: mode) {
+        case .go:
+            memoryChecked[target] = Date()
+            return nil
+        case .refuse(let why):
+            Log.write("memory guard: \(why)")
+            return why
+        case .free(let chosen):
+            Log.write("memory guard: \(target) needs ~\(MemoryGuard.gb(need)), \(MemoryGuard.gb(available)) free; freeing \(chosen.map(\.model).joined(separator: ", "))")
+            for h in chosen {
+                switch h.engine {
+                case .omlx: await OMLXAdmin.unload(h.model, upstream: config.upstream)
+                case .splash: await stopSplashAndWait()
+                default: if let e = externals[h.engine] { await e.stop(config) }
+                }
+            }
+            // Give macOS a moment to hand the pages back.
+            for _ in 0..<20 where MemoryGuard.availableBytes() < need + MemoryGuard.headroom {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            memoryChecked[target] = Date()
+            await refresh()
+            return nil
+        }
+    }
+
     /// The `lsw` command's requests (loopback gateway only).
     func control(_ action: String, _ args: [String: Any]) async -> (Int, [String: Any]) {
         let engineArg = (args["engine"] as? String).flatMap { name in
@@ -678,12 +777,20 @@ final class AppState: ObservableObject {
             let old = config.upstream, oldPort = config.omlxPort
             do { try Ports.setOMLXPort(port) } catch { return error.localizedDescription }
             config.upstream = "http://127.0.0.1:\(port)"; save()
-            if omlxRunning, !(await restartOMLX(runningAt: old)) {
-                // oMLX is still on its old port: point everything back at it.
-                try? Ports.setOMLXPort(oldPort)
-                config.upstream = old; save()
-                await refresh()
-                return "oMLX didn't quit (was its quit dialog cancelled?), so its port wasn't changed."
+            if omlxRunning {
+                switch await restartOMLX(runningAt: old) {
+                case .ok: break
+                case .didNotQuit:
+                    // oMLX is still on its old port: point everything back at it.
+                    try? Ports.setOMLXPort(oldPort)
+                    config.upstream = old; save()
+                    await refresh()
+                    return "oMLX didn't quit (was its quit dialog cancelled?), so its port wasn't changed."
+                case .notAnswering:
+                    // oMLX was reopened with the new port in its settings; going back would point at nothing.
+                    await refreshPorts(); await refresh()
+                    return "oMLX was restarted for port \(port) but isn't answering yet. Check that oMLX opened; its port is now \(port)."
+                }
             }
         }
         await refreshPorts()
@@ -699,9 +806,11 @@ final class AppState: ObservableObject {
         }
     }
 
+    enum OMLXRestart { case ok, didNotQuit, notAnswering }
+
     /// Quits oMLX once nothing is running and opens it again (it reads its port at start).
-    /// False when oMLX didn't quit; nothing is reopened then.
-    func restartOMLX(runningAt current: String) async -> Bool {
+    /// .didNotQuit: nothing was reopened. .notAnswering: reopened, but not answering on the new port.
+    func restartOMLX(runningAt current: String) async -> OMLXRestart {
         busy = "Waiting for oMLX to be idle…"
         _ = await OMLXAdmin.waitUntilIdle(upstream: current, doing: "restarting oMLX") { [weak self] s in self?.busy = s }
         busy = "Restarting oMLX (it may ask you to confirm quitting)…"
@@ -711,14 +820,14 @@ final class AppState: ObservableObject {
             if NSRunningApplication.runningApplications(withBundleIdentifier: OMLXUpdater.bundleID).isEmpty { quit = true; break }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        guard quit else { busy = nil; return false }
+        guard quit else { busy = nil; return .didNotQuit }
         openOMLX()
         for _ in 0..<45 {
-            if await OMLX.isRunning(upstream: config.upstream) { break }
+            if await OMLX.isRunning(upstream: config.upstream) { busy = nil; return .ok }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         busy = nil
-        return true
+        return .notAnswering
     }
 
     func trashModel(_ model: String) {

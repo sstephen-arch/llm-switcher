@@ -9,8 +9,8 @@ configFiles:
   Release: Config/Signing.xcconfig
 settings:
   base:
-    MARKETING_VERSION: "1.5.4"
-    CURRENT_PROJECT_VERSION: "24"
+    MARKETING_VERSION: "1.6.0"
+    CURRENT_PROJECT_VERSION: "26"
     SWIFT_VERSION: "5.0"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Automatic
@@ -24,7 +24,12 @@ targets:
     platform: macOS
     sources:
       - Sources/ClaudeLocal
-      - Resources
+      - path: Resources
+        excludes:
+          - "buildbench/**"
+      # Copied as a folder: the Build Bench driver needs its files side by side.
+      - path: Resources/buildbench
+        type: folder
     settings:
       base:
         PRODUCT_NAME: "LLM Switcher"

@@ -49,6 +49,11 @@ its own slot picks, so switching engines and back loses nothing.
   models folder, Splash's downloads, llama.cpp's and Ollama's caches are read from disk.
 - **Ports never clash.** The Engines tab shows every port (gateway, sharing, each engine), who is
   actually listening on it, and refuses a port another service already uses.
+- **Memory guard.** Engines can't see each other's memory, so a big model on one plus a model still
+  loaded on another sends macOS into swap. Before a model loads, LLM Switcher checks that it fits
+  and, if not, unloads the other engines' models (never one that's busy or was used in the last two
+  minutes), or refuses with a message saying what to unload. A computer on the network never
+  unloads this Mac's models; its request is refused instead. Engines tab > Memory.
 
 ### Tuned settings, applied everywhere
 Untuned local models loop, overthink or ramble. LLM Switcher:
@@ -59,6 +64,8 @@ Untuned local models loop, overthink or ramble. LLM Switcher:
   defaults, a backup model, and an optional lock that ignores the sampling values apps send.
 - **Makes "thinking off" actually work** on engines that ignore Anthropic's `thinking: disabled`
   (it also flips the chat template's `enable_thinking` switch).
+- **Flags untuned models.** A model with no tuned sampling (no preset here, none in oMLX) gets a
+  "Not tuned" badge in Settings and a reminder in the menu when it's on a Claude slot.
 
 ### Share models with other computers, safely
 Turn on **Network sharing** and other machines on your network (Windows too) can use your models
@@ -67,12 +74,36 @@ self-signed certificate, Bonjour discovery and copy-paste setup snippets for Ope
 Codex and PowerShell. Engine admin keys never leave the Mac; only private-network addresses are
 accepted.
 
+### Local Claude Code sessions with guard rails
+`lsw claude` starts Claude Code on a local model, lean (no CLAUDE.md or auto-memory loading, no
+user hooks, plugins or slash commands; the project's AGENTS.md / CLAUDE.md are added to the rules)
+and with every file tool. It runs in Claude Code's sandbox, which is the real boundary: writes
+stay in the project and the build tools' own temp and cache folders (so Xcode and SwiftPM builds
+work), there's no network, and nothing can drive other apps or add launchd jobs (checked: wrapped
+in `bash -c`, curl gets no connection, AppleScript can't reach other apps, launchctl and writes to
+the home folder are refused). On top of that, commands that reach outside (osascript, launchctl,
+ssh, open, curl, sudo and similar, also by full path) are denied by name, and the session rules
+say a refused command is a boundary, not a puzzle, and never to claim something works without
+having run it. Local models tested here did try to get around blocked commands, and claimed
+"verified" for code they had only read. `lsw claude --open` drops the deny list and lets you
+approve a command outside the sandbox.
+
 ### See what's happening
 - **Requests tab:** every request's time to first word, prompt reading speed, writing speed and
   prompt-cache reuse, per model and per request (numbers only; prompts and replies are never
   stored).
 - **Usage tab:** daily tokens per person and per model.
 - **System tab:** CPU, GPU and memory, plus oMLX's own serving stats and prompt cache per model.
+
+### Build Bench: how a model does as an agent
+`lsw buildbench <model>` has the model build a small Swift library (an INI parser, an LRU cache
+and an expression evaluator) in Claude Code, inside the sandbox above. After each pass a hidden
+test suite (20 tests) runs, under a stricter macOS sandbox, and the real results go back to the
+model. The scorecard: hidden tests passed, passes and minutes taken, how often the guard rails
+stopped it, and whether it claimed "done" while hidden tests were still failing. One run at a time;
+the model can't read the hidden tests or the run's logs, its own `Package.swift` isn't used for the
+check, and a test only counts if it reports a random one-time code after finishing with no
+failures, so printing fake "passed" lines scores nothing (checked against a cheating solution).
 
 ### Benchmark any model
 One click (or `lsw bench`) runs: writing speed, reading speed on a long prompt with a hidden-word
@@ -87,7 +118,12 @@ lsw status                  engines, which one Claude uses, slot picks
 lsw models                  every installed model, by engine
 lsw use <engine>            switch engine
 lsw start|stop <engine>
-lsw claude [slot] [args]    Claude Code on a local model (lean setup for fast local prefill)
+lsw claude [--open] [slot] [args]
+                            Claude Code on a local model (lean, sandboxed, guard rails)
+lsw stats [model] [--since 2h]
+                            real speed, cache reuse and failures from the request log
+lsw buildbench <model> [minutes]
+                            agent benchmark (see Build Bench)
 lsw codex [model] [args]    Codex on a local model
 lsw tune <model>            recommended settings for a model
 lsw bench <model> [hard|all|none] [default|off|low|medium|high]
@@ -98,7 +134,8 @@ lsw bench <model> [hard|all|none] [default|off|low|medium|high]
   compatibility check against your oMLX before download; resumable downloads; oMLX per-model
   settings; clean removal (unload, settings, folder and prompt-cache files to the Trash).
 - **Review loop:** a writer model drafts code, a reviewer model critiques it, optional test
-  command, keeps the best round. A Claude Code `Stop` hook (`scripts/llm-review-hook.py`) does the
+  command, keeps the best round. An optional screenshot command (e.g. the iOS Simulator's) sends
+  the reviewer a picture of the running result, to catch what tests can't see. A Claude Code `Stop` hook (`scripts/llm-review-hook.py`) does the
   same for local Claude Code sessions.
 - **Watchdog:** when an engine silently drops a request (oMLX does when it reloads), the client gets
   a clear error after ~90 s instead of hanging forever.
@@ -169,8 +206,8 @@ Ideas that would make it better, roughly in order of value:
 
 1. **Real-world testing with Ollama and LM Studio.** Both are wired in but were only tested against
    stand-in servers. Reports and fixes from real use are the most useful thing right now.
-2. **A memory budget across engines.** oMLX doesn't know about Splash's model and vice versa.
-   Before starting a model, add up what every engine has loaded and offer to unload what won't fit.
+2. **Memory sizes for Ollama, LM Studio and llama.cpp models.** The memory guard knows oMLX's and
+   Splash's model sizes; the others' models aren't measured yet, so it can't plan room for them.
 3. **UI tests and screenshots.** The menu bar app is hard to automate; XCUITest coverage of the
    menu and Settings would catch regressions the unit tests can't.
 4. **More engines:** vllm-metal, mlx-lm's server (OpenAI-only), anything else with an

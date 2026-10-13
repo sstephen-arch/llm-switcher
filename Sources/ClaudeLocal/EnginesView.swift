@@ -9,6 +9,7 @@ struct EnginesSettings: View {
     var body: some View {
         Form {
             PortsSection()
+            MemoryGuardSection()
             SplashSection(server: state.splash)
             ForEach(EngineKind.external, id: \.self) { k in
                 if let e = state.externals[k] { ExternalEngineSection(engine: e) }
@@ -36,6 +37,21 @@ struct PortsSection: View {
                 Spacer()
                 Button("Check again") { Task { await state.refreshPorts() } }.buttonStyle(.link).font(.caption)
             }
+        }
+    }
+}
+
+struct MemoryGuardSection: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        Section("Memory") {
+            Picker("Memory guard", selection: Binding(get: { state.config.memoryGuard },
+                                                      set: { state.config.memoryGuard = $0; state.save() })) {
+                ForEach(MemoryGuard.Mode.allCases) { Text($0.label).tag($0) }
+            }
+            Text("Engines don't see each other's memory. Before a model loads, LLM Switcher checks it fits beside the models other engines have loaded. If it doesn't, it unloads them (never one that's busy), or refuses with a message saying what to unload.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

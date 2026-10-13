@@ -1,0 +1,6 @@
+import XCTest
+@testable import BenchKit
+
+final class BenchKitTests: XCTestCase {
+    // Add your own tests here.
+}

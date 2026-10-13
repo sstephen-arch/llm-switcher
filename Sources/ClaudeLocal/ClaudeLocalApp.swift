@@ -174,6 +174,11 @@ struct SlotPickers: View {
                     .labelsHidden()
                 }
             }
+            let untuned = state.untunedSlotModels
+            if !untuned.isEmpty {
+                Text("Not tuned: \(untuned.joined(separator: ", ")). Untuned models can loop or ramble; apply the recommended settings in Settings > Models.")
+                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

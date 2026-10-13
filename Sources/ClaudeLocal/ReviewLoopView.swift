@@ -15,6 +15,7 @@ struct ReviewLoopView: View {
     @AppStorage("loop.file") private var fileName = "solution.py"
     @AppStorage("loop.command") private var command = ""
     @AppStorage("loop.task") private var task = ""
+    @AppStorage("loop.screenshot") private var screenshot = ""
 
     var body: some View {
         Form {
@@ -55,6 +56,9 @@ struct ReviewLoopView: View {
                 TextField("Save the code as", text: $fileName)
                 TextField("Test command, e.g. python3 -m pytest -q", text: $command)
                 Text("Each version is saved to the file and the command runs in the folder. Exit code 0 means pass; pytest-style \"N passed, M failed\" scores partial passes, so a fix that makes things worse is thrown away.")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("Screenshot command (optional), e.g. xcrun simctl io booted screenshot \"$OUT\"", text: $screenshot)
+                Text("Runs after the tests each round and must save a PNG to $OUT. The reviewer gets the image, to catch what tests can't see: clipped labels, missing text, broken layout. A reviewer that can't read images reviews without it.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -128,7 +132,8 @@ struct ReviewLoopView: View {
 
     private func start() {
         loop.start(.init(task: task, writer: writer, reviewer: reviewer, rounds: rounds, reviewerEffort: reviewerEffort, folder: folder,
-                         fileName: fileName.trimmingCharacters(in: .whitespaces), testCommand: command))
+                         fileName: fileName.trimmingCharacters(in: .whitespaces), testCommand: command,
+                         screenshotCommand: screenshot))
     }
 
     private func chooseFolder() {

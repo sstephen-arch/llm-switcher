@@ -85,6 +85,8 @@ final class Gateway {
     var onActivity: ((Activity) -> Void)?
     /// Starts a stopped engine when a request asks for one of its models (false = couldn't).
     var ensureEngine: ((EngineKind) async -> Bool)?
+    /// Makes room for a model that isn't loaded yet; returns why it can't (nil = go ahead).
+    var prepareMemory: ((String) async -> String?)?
     /// The `lsw` command's control calls (this Mac only): status, ensure, use, start, stop.
     var control: ((String, [String: Any]) async -> (Int, [String: Any]))?
     private let limiter = Limiter()
@@ -285,6 +287,12 @@ final class Gateway {
         }
         // The model's engine is stopped: start it (it loads the model on this request) and look again.
         let mayUse = kind == .local || cfg.sharedModels == nil || cfg.sharedModels!.contains(target)
+        // Another engine's loaded model would leave no room for this one: free it (or say why not).
+        if !target.isEmpty, mayUse, req.path != "/v1/messages/count_tokens", let prepareMemory,
+           let problem = await prepareMemory(target) {
+            release()
+            return respond(conn, 503, error: problem, type: "overloaded_error")
+        }
         if !target.isEmpty, catalog[target] == nil, mayUse, let ensureEngine {
             let engine = Engines.kind(of: target)
             // Splash runs one model: asked for the model it's now set to while still serving the old
@@ -640,18 +648,14 @@ final class StreamRelay: NSObject, URLSessionDataDelegate {
     }
 
     /// A streamed chunk carrying text (answer, thinking or tool arguments), not just a role or ping.
+    /// Engines differ in spacing (oMLX writes `"text": "Hi"`, llama.cpp `"text":"Hi"`), so the
+    /// key, colon and opening quote may have spaces between them; an empty string doesn't count.
     static func hasOutput(_ data: Data) -> Bool {
-        let t = String(decoding: data, as: UTF8.self)
-        for key in ["\"content\":\"", "\"text\":\"", "\"thinking\":\"", "\"reasoning_content\":\"",
-                    "\"reasoning\":\"", "\"partial_json\":\"", "\"delta\":\""] {
-            var search = t[...]
-            while let r = search.range(of: key) {
-                if search[r.upperBound...].first.map({ $0 != "\"" }) == true { return true }
-                search = search[r.upperBound...]
-            }
-        }
-        return false
+        String(decoding: data, as: UTF8.self).range(of: outputPattern, options: .regularExpression) != nil
     }
+
+    private static let outputPattern =
+        #""(content|text|thinking|reasoning_content|reasoning|partial_json|delta)"\s*:\s*"[^"]"#
 
     /// Keep-alive pings carry no output, so they don't count as the request making progress.
     static func isPing(_ data: Data) -> Bool {

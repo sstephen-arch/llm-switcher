@@ -7,8 +7,15 @@
 #   lsw models                  every model, by engine
 #   lsw use <engine>            show/use that engine (live at once unless Claude Desktop is local)
 #   lsw start|stop <engine>     start or stop an engine
-#   lsw claude [slot] [args]    Claude Code on a local model (slot: sonnet, opus, fable, haiku,
-#                               sonnet46; default sonnet). Lean setup, as claude-omlx was.
+#   lsw claude [--open] [slot] [args]
+#                               Claude Code on a local model (slot: sonnet, opus, fable, haiku,
+#                               sonnet46; default sonnet). Lean setup, sandboxed, with guard rails
+#                               (--open: no command deny list, unsandboxed commands may be approved).
+#   lsw stats [model|slot] [--since 2h]
+#                               speed, cache reuse and failures from the request log, per model
+#   lsw buildbench <model|slot> [minutes]
+#                               agent benchmark: the model builds a small Swift library in a
+#                               sandbox, with real test results fed back each pass
 #   lsw codex [model] [args]    Codex on a local model (default: the Sonnet slot's model)
 #   lsw tune <model|slot>       the model's published recommended settings (apply in the app)
 #   lsw bench <model|slot> [hard|all|none] [default|off|low|medium|high]
@@ -17,6 +24,7 @@
 # Installed by LLM Switcher's release script; claude-omlx is now a shortcut to `lsw claude`.
 
 GATEWAY="http://127.0.0.1:11436"
+APP_RES="${LSW_APP_RES:-/Applications/LLM Switcher.app/Contents/Resources}"
 
 gw_up() { curl -s -m 2 -o /dev/null "$GATEWAY/health"; }
 need_gateway() {
@@ -87,14 +95,48 @@ for e in json.load(sys.stdin)["engines"]:
     echo "✓ $cmd $1"
     ;;
   claude)
+    OPEN=0; [[ $1 == --open ]] && { OPEN=1; shift; }
     if [[ -n $1 ]] && SLOT=$(slot_id "$1"); then shift; else SLOT=claude-sonnet-5; fi
     need_gateway
     ensure "$SLOT"
+    # Rules: yours (~/.claude/local-model-rules.md) or the app's default, plus the guard rails
+    # (always, unless --open), plus the project's AGENTS.md / CLAUDE.md.
     RULES=$(mktemp -t lsw-claude-rules)
-    [[ -f "$HOME/.claude/local-model-rules.md" ]] && cat "$HOME/.claude/local-model-rules.md" > "$RULES"
+    if [[ -f "$HOME/.claude/local-model-rules.md" ]]; then cat "$HOME/.claude/local-model-rules.md" > "$RULES"
+    elif [[ -f "$APP_RES/local-model-rules.md" ]]; then cat "$APP_RES/local-model-rules.md" > "$RULES"; fi
+    if (( ! OPEN )); then
+      if [[ -f "$APP_RES/local-guard-rules.md" ]]; then { print; cat "$APP_RES/local-guard-rules.md"; } >> "$RULES"
+      else echo "⚠️  guard-rail rules not found in $APP_RES" >&2; fi
+    fi
     for f in AGENTS.md CLAUDE.md; do
       [[ -f "$f" ]] && { print "\n# Project instructions ($f)\n"; cat "$f"; } >> "$RULES"
     done
+    # Sandbox: writes stay in this folder plus the build tools' own temp and cache folders (without
+    # those, every Xcode and SwiftPM build fails). Unless --open: commands that reach outside the
+    # sandbox (other apps, launchd, other machines) are denied and nothing may run unsandboxed.
+    SETTINGS=$(mktemp -t lsw-claude-settings)
+    /usr/bin/python3 - "$SETTINGS" "$OPEN" "$(getconf DARWIN_USER_TEMP_DIR)" "$(getconf DARWIN_USER_CACHE_DIR)" <<'PY'
+import json, os, sys
+path, open_mode, tmp, cache = sys.argv[1], sys.argv[2] == "1", sys.argv[3], sys.argv[4]
+writable = []
+for p in (tmp, cache):
+    if p:
+        writable += [p.rstrip("/"), os.path.realpath(p).rstrip("/")]
+writable += ["~/Library/Developer/Xcode", "~/Library/Developer/CoreSimulator/Caches",
+             "~/Library/Caches/com.apple.dt.xcodebuild", "~/Library/Caches/org.swift.swiftpm", "~/.swiftpm"]
+# Rules match the command text, so the full-path forms are listed too. They're a second layer:
+# the sandbox itself is what stops a wrapped call (bash -c '...').
+cmds = ("osascript", "launchctl", "ssh", "scp", "sftp", "crontab", "at", "open", "curl", "wget", "nc",
+        "sudo", "security", "defaults write", "sandbox-exec", "codesign")
+deny = [] if open_mode else ["Bash(%s%s:*)" % (d, c) for c in cmds for d in ("", "/usr/bin/", "/bin/", "/usr/sbin/", "/opt/homebrew/bin/")]
+settings = {
+    "disableAllHooks": True,
+    "sandbox": {"enabled": True, "allowUnsandboxedCommands": open_mode,
+                "filesystem": {"allowWrite": sorted(set(writable))}},
+    "permissions": {"allow": ["Bash(xcodebuild:*)", "Bash(xcodegen:*)"], "deny": deny},
+}
+json.dump(settings, open(path, "w"), indent=1)
+PY
     # A parent Claude session's variables would otherwise win over ours.
     for v in ${(k)parameters[(I)(ANTHROPIC_*|CLAUDE_*|CLAUDECODE)]}; do unset $v; done
     export ANTHROPIC_BASE_URL="$GATEWAY"
@@ -108,10 +150,17 @@ for e in json.load(sys.stdin)["engines"]:
     export CLAUDE_STREAM_IDLE_TIMEOUT_MS=900000
     export API_FORCE_IDLE_TIMEOUT=0
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-    MCP=(); [[ -f "$HOME/.claude/local-mcp.json" ]] && MCP=(--strict-mcp-config --mcp-config "$HOME/.claude/local-mcp.json")
-    exec claude --bare \
+    # Lean, like --bare used to be (which also cut the tools to Bash, Read and Edit): no CLAUDE.md
+    # or auto-memory loading (the project files are in the rules above), no user or project
+    # settings, hooks, plugins or slash commands; MCP servers only from local-mcp.json.
+    export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1
+    export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+    MCP=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
+    [[ -f "$HOME/.claude/local-mcp.json" ]] && MCP=(--strict-mcp-config --mcp-config "$HOME/.claude/local-mcp.json")
+    exec claude \
+      --setting-sources local \
       --model "$SLOT" \
-      --settings '{"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}' \
+      --settings "$SETTINGS" \
       "${MCP[@]}" \
       --disable-slash-commands \
       --exclude-dynamic-system-prompt-sections \
@@ -166,8 +215,79 @@ t = r.get("toolCall"); print("  tool call: {}".format("–" if t is None else ("
 if r.get("codingTotal"): print("  coding: {}/{}".format(r["codingPassed"], r["codingTotal"]))
 print("  {:.1f} min".format(r["minutes"]))'
     ;;
+  buildbench)
+    [[ -n $1 ]] || { echo "usage: lsw buildbench <model or slot> [minutes]" >&2; exit 2; }
+    need_gateway
+    target=$1
+    if s=$(slot_id "$1" 2>/dev/null) && [[ $1 == (sonnet|opus|fable|haiku|sonnet46) ]]; then
+      target=$(curl -s -m 30 "$GATEWAY/local/status" | jget "slots.$s")
+      [[ -n $target ]] || { echo "❌ Nothing is on the $1 slot." >&2; exit 1; }
+    fi
+    ensure "$target"
+    [[ -f "$APP_RES/buildbench/driver.py" ]] || { echo "❌ Build Bench files not found in $APP_RES" >&2; exit 1; }
+    exec /usr/bin/python3 "$APP_RES/buildbench/driver.py" --model "$target" --minutes "${2:-45}"
+    ;;
+  stats)
+    model=""; since=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --since) since=$2; shift 2 ;;
+        *) model=$1; shift ;;
+      esac
+    done
+    if [[ -n $model ]] && s=$(slot_id "$model" 2>/dev/null) && [[ $model == (sonnet|opus|fable|haiku|sonnet46) ]]; then
+      need_gateway
+      slot=$model
+      model=$(curl -s -m 30 "$GATEWAY/local/status" | jget "slots.$s")
+      [[ -n $model ]] || { echo "❌ Nothing is on the $slot slot." >&2; exit 1; }
+    fi
+    /usr/bin/python3 - "$HOME/Library/Logs/ClaudeLocal/requests.jsonl" "$model" "$since" <<'PY'
+import json, sys, re, statistics as st
+from datetime import datetime, timezone, timedelta
+path, want, since = sys.argv[1], sys.argv[2], sys.argv[3]
+cut = None
+if since:
+    m = re.fullmatch(r"(\d+)([mhd])", since)
+    if not m: sys.exit("--since takes e.g. 30m, 2h or 1d")
+    unit = {"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+    cut = datetime.now(timezone.utc) - timedelta(**{unit: int(m.group(1))})
+rows = []
+try:
+    for line in open(path):
+        try: r = json.loads(line)
+        except ValueError: continue
+        if want and r.get("model") != want: continue
+        if cut:
+            try:
+                if datetime.fromisoformat(r["date"].replace("Z", "+00:00")) < cut: continue
+            except (KeyError, ValueError): continue
+        rows.append(r)
+except FileNotFoundError:
+    sys.exit("No request log yet (" + path + ")")
+if not rows: sys.exit("No requests" + (" for " + want if want else "") + (" in the last " + since if since else "") + ".")
+by = {}
+for r in rows: by.setdefault(r.get("model", "?"), []).append(r)
+def num(v, n=0): return "-" if v is None else ("{:,.%df}" % n).format(v)
+for model, rs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+    ok = [r for r in rs if 200 <= r.get("status", 0) < 300]
+    out = sum(r.get("outputTokens", 0) for r in ok); secs = sum(r.get("seconds", 0) for r in ok)
+    prompt = sum(r.get("inputTokens", 0) for r in ok)
+    # Lines from before 1.5.5 counted cached tokens outside the prompt total: cap at the prompt.
+    cached = sum(min(r.get("cachedTokens") or 0, r.get("inputTokens", 0)) for r in ok)
+    long = [r["outputTokens"] / r["seconds"] for r in ok if r.get("outputTokens", 0) >= 500 and r.get("seconds")]
+    fw = [r["firstWord"] for r in ok if r.get("firstWord") is not None]
+    first, last = rs[0].get("date", "")[:16].replace("T", " "), rs[-1].get("date", "")[:16].replace("T", " ")
+    print(model)
+    print("  {} requests ({} failed), {} to {} UTC".format(len(rs), len(rs) - len(ok), first, last))
+    print("  output {} tokens in {:.1f} min of model time: {} tok/s overall".format(num(out), secs / 60, num(out / secs if secs else None, 1)))
+    if long:
+        print("  replies of 500+ tokens: {}, typical {} tok/s (range {}-{})".format(len(long), num(st.median(long), 1), num(min(long), 1), num(max(long), 1)))
+    if fw: print("  first word: median {}s".format(num(st.median(fw), 1)))
+    if prompt: print("  prompt {} tokens, {}% read from cache".format(num(prompt), num(100.0 * cached / prompt)))
+PY
+    ;;
   -h|--help|help)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     echo "lsw: unknown command '$cmd' (lsw help)" >&2; exit 2 ;;

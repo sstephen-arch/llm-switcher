@@ -49,4 +49,22 @@ final class InspectorBenchTests: XCTestCase {
         XCTAssertTrue(StreamRelay.hasOutput(Data(#"data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hm"}}"#.utf8)))
         XCTAssertFalse(StreamRelay.hasOutput(Data("event: ping\ndata: {\"type\": \"ping\"}\n\n".utf8)))
     }
+
+    func testFirstOutputWithSpacesAndAnthropicPromptTotals() {
+        XCTAssertTrue(StreamRelay.hasOutput(Data(#"data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Ok"}}"#.utf8)), "oMLX spacing")
+        XCTAssertFalse(StreamRelay.hasOutput(Data(#"data: {"delta": {"role": "assistant", "content": ""}}"#.utf8)))
+        let anthropic = #"{"usage": {"input_tokens": 12, "cache_read_input_tokens": 116377, "cache_creation_input_tokens": 0}} {"usage": {"output_tokens": 2659}}"#
+        let t = UsageStore.tokens(in: anthropic)
+        XCTAssertEqual(t.input, 116389, "new + cached = the whole prompt")
+        XCTAssertEqual(t.output, 2659)
+        XCTAssertEqual(UsageStore.cachedTokens(in: anthropic), 116377)
+        let openai = #"{"usage":{"prompt_tokens":5000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":4000}}}"#
+        XCTAssertEqual(UsageStore.tokens(in: openai).input, 5000, "OpenAI's prompt_tokens already includes cached")
+    }
+
+    func testHugeTokenNumbersCannotOverflow() {
+        let hostile = #"{"input_tokens": 9223372036854775807, "cache_read_input_tokens": 9223372036854775807, "cache_creation_input_tokens": 99999999999999999999}"#
+        let t = UsageStore.tokens(in: hostile)
+        XCTAssertLessThanOrEqual(t.input, 3 << 40)
+    }
 }
