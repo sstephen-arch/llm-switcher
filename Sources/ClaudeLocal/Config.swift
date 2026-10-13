@@ -149,6 +149,12 @@ struct SplashConfig: Codable, Equatable {
 
     var upstream: String { "http://127.0.0.1:\(port)" }
 
+    /// Splash runs one model, so every Splash slot that has a model uses the same one.
+    static func unifiedPicks(_ picks: [String: String], model served: String) -> [String: String] {
+        guard !served.isEmpty else { return picks }
+        return picks.mapValues { $0.isEmpty ? $0 : served }
+    }
+
     /// The name the model is served and listed under: "splash/" + the repo name, so it never
     /// collides with the same weights in oMLX.
     static func servedName(_ model: String) -> String {

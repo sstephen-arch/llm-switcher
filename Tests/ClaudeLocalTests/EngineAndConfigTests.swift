@@ -96,4 +96,13 @@ final class EngineAndConfigTests: XCTestCase {
         XCTAssertEqual(oc?["format"] as? String, "x", "other output_config fields are kept")
         XCTAssertEqual((payload["thinking"] as? [String: Any])?["type"] as? String, "enabled")
     }
+
+    func testSplashSlotsAllUseOneModel() {
+        let mixed = ["claude-fable-5": "splash/Qwen3.8-27B-8bit", "claude-opus-5": "splash/Qwen3.6-35B-A3B-8bit", "claude-haiku-4-5-20251001": ""]
+        let fixed = SplashConfig.unifiedPicks(mixed, model: "splash/Qwen3.6-35B-A3B-8bit")
+        XCTAssertEqual(fixed["claude-fable-5"], "splash/Qwen3.6-35B-A3B-8bit")
+        XCTAssertEqual(fixed["claude-opus-5"], "splash/Qwen3.6-35B-A3B-8bit")
+        XCTAssertEqual(fixed["claude-haiku-4-5-20251001"], "", "an empty slot stays empty")
+        XCTAssertEqual(SplashConfig.unifiedPicks(mixed, model: ""), mixed, "no Splash model chosen: leave them")
+    }
 }

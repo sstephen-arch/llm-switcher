@@ -103,6 +103,7 @@ final class AppState: ObservableObject {
         usage = UsageStore.shared.snapshot()
         // The unit-test host runs beside the real app: it must not fight it for the gateway's ports.
         if !testing {
+            unifySplashPicks()
             startGateway()
             if config.shareEnabled { startSharing() }
         }
@@ -179,9 +180,25 @@ final class AppState: ObservableObject {
             chooseSplashModel(repo)
         }
         var picks = slotPicks(viewEngine)
+        if viewEngine == .splash && !model.isEmpty {
+            picks = SplashConfig.unifiedPicks(picks, model: model)
+        }
         picks[slot.id] = model.isEmpty ? nil : model
         setPicks(picks, for: viewEngine)
         save()
+    }
+
+    /// Repairs Splash picks that name different models (older versions could leave them so): every
+    /// Splash slot uses the model Splash is set to run.
+    private func unifySplashPicks() {
+        let served = SplashConfig.servedName(config.splash.model)
+        let picks = slotPicks(.splash)
+        let fixed = SplashConfig.unifiedPicks(picks, model: served)
+        if fixed != picks {
+            Log.write("Splash slots named different models; all now use \(served)")
+            setPicks(fixed, for: .splash)
+            save()
+        }
     }
 
     /// An engine's Claude slot picks. The live engine's are `config.slots` (what the gateway uses).
@@ -416,7 +433,11 @@ final class AppState: ObservableObject {
             return false
         case .splash:
             // Saved settings (e.g. a new model) that the running Splash doesn't have yet.
-            if splash.differs(from: config.splash) { splash.start(config) }
+            // New settings, or (after an app restart) a running Splash serving another model.
+            let wanted = SplashConfig.servedName(config.splash.model)
+            if splash.differs(from: config.splash) || (splash.isUp && !splash.servedModel.isEmpty && splash.servedModel != wanted) {
+                splash.start(config)
+            }
             let ok = await ensureSplash()
             followServedSplashModel()
             return ok
@@ -560,11 +581,10 @@ final class AppState: ObservableObject {
     // MARK: Splash
 
     func setSplash(_ c: SplashConfig) {
-        // A stopped Splash: its slots move to the new model now. A running one keeps serving the
-        // old model until it restarts, so its slots move when the new model is ready (refresh).
-        if splash.phase == .stopped || splash.phase.isFailed {
-            renameSplashModel(from: SplashConfig.servedName(config.splash.model), to: SplashConfig.servedName(c.model))
-        }
+        // Slots move to the new model now, running or not. If Splash is still serving the old one,
+        // the next request for the new model restarts it (Gateway.route), so a slot never waits on
+        // a model Splash won't load.
+        renameSplashModel(from: SplashConfig.servedName(config.splash.model), to: SplashConfig.servedName(c.model))
         config.splash = c
         save()
     }

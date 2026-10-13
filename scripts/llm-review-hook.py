@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""LLM Switcher review hook for Claude Code (Stop event).
+"""LLM Switcher review hook for Claude Code.
 
-When a LOCAL Claude Code session (one talking to LLM Switcher on 127.0.0.1:11436) finishes a request
-in which it edited files in a git repo, this sends the uncommitted changes for an adversarial review,
-optionally runs the project's tests, and, if there are problems, hands them back so the writer fixes
-them before stopping. Light by default: the session's own model reviews (it's already loaded, so no
-second big model has to load), at medium thinking, one round. Requests that edited nothing are never
-reviewed. Cloud sessions are never touched.
+When a LOCAL Claude Code session (one talking to LLM Switcher on 127.0.0.1:11436) is about to run a
+`git commit` (PreToolUse on Bash), this reviews the repo's uncommitted changes adversarially,
+and, if there are problems, holds the commit back and hands the
+findings to Claude to fix; the next commit attempt goes through (one review per request by default),
+so a review never blocks a commit for good. Normal conversation is never reviewed. Because this runs
+before the person approves the command, it only reviews repos inside the session's own folder and
+never runs a repo's "test" command (tests run only in "when": "stop" mode). Light by default:
+the session's own model reviews (already loaded), at medium thinking. Cloud sessions are never touched.
 
 Off switches: LLM_REVIEW=off in the environment, the toggle in LLM Switcher's Review loop tab, or a
 .llm-review.json in the repo with {"enabled": false}.
 
 Per-repo settings, .llm-review.json at the repo root (all optional):
   {"test": "swift test", "test_timeout": 600, "reviewer": "Qwen3.8-Flash-Next-oQ4e-mtp",
-   "effort": "high", "max_rounds": 3, "enabled": true, "review_all": false}
-Defaults: reviewer = the session's model, effort "medium", max_rounds 1, review_all false.
+   "effort": "high", "max_rounds": 3, "enabled": true, "when": "commit", "review_all": false}
+Defaults: reviewer = the session's model, effort "medium", max_rounds 1, when "commit".
+"when": "stop" brings back the older review after every turn that edited files (review_all: true
+reviews every turn with uncommitted changes). Registered for both PreToolUse (matcher Bash) and Stop.
 
 Runs on the macOS system Python (3.9), standard library only.
 """
@@ -178,6 +182,27 @@ def review(reviewer, effort, task, diff, failures, timeout=1100):
     return (d["choices"][0]["message"].get("content") or "").strip()
 
 
+COMMIT = re.compile(r"\bgit\s+(?:-[Cc]\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*commit(?![-\w])")
+GIT_DIR = re.compile(r"\bgit\s+-C\s+(\"[^\"]*\"|'[^']*'|\S+)")
+CD = re.compile(r"(?:^|&&|;|\|\|)\s*cd\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+)")
+
+
+def commit_dir(command, cwd):
+    """The folder a shell command commits in: `git -C <dir>`, else the last `cd <dir>` before the
+    commit, else the session's folder. None when the command doesn't commit."""
+    m = COMMIT.search(command or "")
+    if not m:
+        return None
+    before = command[:m.end()]
+    target = cwd
+    for c in CD.finditer(before):
+        target = os.path.join(target, os.path.expanduser(c.group(1).strip("\"'")))
+    g = GIT_DIR.search(before[m.start():])
+    if g:
+        target = os.path.join(target, os.path.expanduser(g.group(1).strip("\"'")))
+    return os.path.normpath(target)
+
+
 def main():
     import time
     started = time.time()
@@ -192,6 +217,24 @@ def main():
     if app_default("loop.autoReview", "1") in ("0", "false", "NO"):
         return 0
     cwd = data.get("cwd") or os.getcwd()
+    # Reviews run when Claude is about to commit (PreToolUse on a `git commit`), not after every turn.
+    # A repo can ask for the old after-every-turn review with "when": "stop" in .llm-review.json.
+    event = data.get("hook_event_name") or "Stop"
+    if event == "PreToolUse":
+        if data.get("tool_name") != "Bash":
+            return 0
+        target = commit_dir((data.get("tool_input") or {}).get("command", ""), cwd)
+        if not target:
+            return 0                                      # not a commit
+        # PreToolUse runs before the person approves the command, and the folder comes from the
+        # command's text: only review inside the session's own folder, never a repo it names elsewhere.
+        home = os.path.realpath(cwd)
+        real = os.path.realpath(target)
+        if real != home and not real.startswith(home + os.sep):
+            return 0
+        cwd = target
+    elif event != "Stop":
+        return 0
     try:
         code, root = run(["git", "rev-parse", "--show-toplevel"], cwd, timeout=10)
     except Exception:
@@ -207,10 +250,23 @@ def main():
         pass
     if cfg.get("enabled") is False:
         return 0
-    # Only review requests that changed files (set "review_all": true to review any uncommitted diff).
+    at_commit = event == "PreToolUse"
+    if at_commit != (cfg.get("when", "commit") != "stop"):
+        return 0                                          # this repo reviews at the other moment
     tr = read_transcript(data.get("transcript_path"))
-    if not cfg.get("review_all") and not tr["edited"]:
+    # After-every-turn mode only: skip requests that changed nothing (review_all: true overrides).
+    if not at_commit and not cfg.get("review_all") and not tr["edited"]:
         return 0
+
+    def note(text):
+        return emit({"systemMessage": text})
+
+    def hold(reason):
+        """Hold back the commit (or the end of the turn) and hand the findings to Claude."""
+        if at_commit:
+            return emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                "permissionDecisionReason": reason}})
+        return emit({"decision": "block", "reason": reason})
 
     diff = changes(root)
     if not diff.strip():
@@ -237,10 +293,14 @@ def main():
     if state["rounds"] >= max_rounds:
         state["last_diff"] = diff_hash
         json.dump(state, open(state_path, "w"))
-        return emit({"systemMessage": "LLM Switcher review: stopped after %d rounds; check the remaining points yourself." % max_rounds})
+        if at_commit:
+            return note("LLM Switcher review: already reviewed for this request; committing.")
+        return note("LLM Switcher review: stopped after %d round%s; check the remaining points yourself." % (max_rounds, "" if max_rounds == 1 else "s"))
 
     failures, test_note, regress = "", "", ""
-    if cfg.get("test"):
+    # Never run a repo's test command at commit time: that would run code from .llm-review.json before
+    # the person has approved the commit. Tests run only in the after-the-turn ("when": "stop") mode.
+    if cfg.get("test") and not at_commit:
         passed, score, out, summary = run_tests(cfg["test"], root, min(int(cfg.get("test_timeout", 600)), 900))
         test_note = " Tests (`%s`): %s." % (cfg["test"], summary)
         if not passed:
@@ -264,27 +324,28 @@ def main():
     effort = cfg.get("effort") or "medium"
     left = HOOK_BUDGET - (time.time() - started)
     if left < 120:
-        return emit({"systemMessage": "LLM Switcher review skipped: the tests used up the review's time. Lower test_timeout in .llm-review.json."})
+        return note("LLM Switcher review skipped: the tests used up the review's time. Lower test_timeout in .llm-review.json.")
     try:
         text = review(reviewer, effort, task, diff, failures, timeout=left)
     except Exception as e:
-        return emit({"systemMessage": "LLM Switcher review skipped: the reviewer couldn't be reached (%s)." % e})
+        return note("LLM Switcher review skipped: the reviewer couldn't be reached (%s)." % e)
 
     state["rounds"] += 1
     state["last_diff"] = diff_hash
     json.dump(state, open(state_path, "w"))
     clean = is_clean(text, failures)
     if clean:
-        return emit({"systemMessage": "LLM Switcher review (%s, %s): no issues found.%s" % (reviewer, effort, test_note)})
+        return note("LLM Switcher review (%s, %s): no issues found.%s" % (reviewer, effort, test_note))
     reason = (
-        "A reviewer (%s, %s reasoning) checked your uncommitted changes. Round %d of %d.%s\n\n"
+        "A reviewer (%s, %s reasoning) checked your uncommitted changes%s. Round %d of %d.%s\n\n"
         "%s%s\n\nREVIEW:\n%s\n\n"
         "Verify each point against the code before changing anything: the reviewer can be wrong, while "
-        "failing tests are ground truth. Fix the real problems, then finish. For any point you reject, "
+        "failing tests are ground truth. Fix the real problems, then %s. For any point you reject, "
         "say why in one line.%s"
-        % (reviewer, effort, state["rounds"], max_rounds, test_note,
-           failures[:3000], "\n" if failures else "", text[:8000] or "(empty review)", regress))
-    return emit({"decision": "block", "reason": reason})
+        % (reviewer, effort, " before this commit" if at_commit else "", state["rounds"], max_rounds, test_note,
+           failures[:3000], "\n" if failures else "", text[:8000] or "(empty review)",
+           "commit again" if at_commit else "finish", regress))
+    return hold(reason)
 
 
 if __name__ == "__main__":

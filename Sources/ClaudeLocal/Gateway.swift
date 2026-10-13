@@ -287,8 +287,12 @@ final class Gateway {
         let mayUse = kind == .local || cfg.sharedModels == nil || cfg.sharedModels!.contains(target)
         if !target.isEmpty, catalog[target] == nil, mayUse, let ensureEngine {
             let engine = Engines.kind(of: target)
-            if !(await Self.engineUp(engine, cfg)) {
-                Log.write("\(target) asked for while \(engine.label) is stopped; starting it")
+            // Splash runs one model: asked for the model it's now set to while still serving the old
+            // one, it restarts on the new one.
+            let splashSwitch = engine == .splash && target == SplashConfig.servedName(cfg.splash.model)
+            let needsStart = splashSwitch ? true : !(await Self.engineUp(engine, cfg))
+            if needsStart {
+                Log.write("\(target) asked for while \(engine.label) \(splashSwitch ? "serves another model; switching it" : "is stopped; starting it")")
                 if await ensureEngine(engine) {
                     catalog = await Engines.catalog(cfg)
                     available = catalog.keys.sorted()

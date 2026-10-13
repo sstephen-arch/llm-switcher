@@ -119,5 +119,47 @@ class ShellEditTests(unittest.TestCase):
             self.assertFalse(hook._edits({"type": "tool_use", "name": "Bash", "input": {"command": c}}), c)
 
 
+class CommitTriggerTests(unittest.TestCase):
+    def test_finds_commits_and_their_folder(self):
+        cwd = "/work/app"
+        self.assertEqual(hook.commit_dir("git commit -m 'x'", cwd), "/work/app")
+        self.assertEqual(hook.commit_dir("git add -A && git commit -q -F - <<'EOF'", cwd), "/work/app")
+        self.assertEqual(hook.commit_dir("cd ~/Developer/x && git add . && git commit -m y", cwd), os.path.expanduser("~/Developer/x"))
+        self.assertEqual(hook.commit_dir("cd sub && git commit -am fix", cwd), "/work/app/sub")
+        self.assertEqual(hook.commit_dir("git -C /repo/other commit -m z", cwd), "/repo/other")
+        for not_commit in ["git status", "git commit-tree abc -m x", "git log --grep commit", "echo commit", "git diff"]:
+            self.assertIsNone(hook.commit_dir(not_commit, cwd), not_commit)
+
+    def test_normal_turns_and_other_commands_are_left_alone(self):
+        local = "http://127.0.0.1:11436"
+        repo = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", repo])
+        open(os.path.join(repo, "a.py"), "w").write("x = 1\n")
+        for payload in [
+            {"hook_event_name": "Stop", "session_id": "s1", "cwd": repo, "transcript_path": "/nonexistent"},
+            {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status"}, "session_id": "s1", "cwd": repo},
+            {"hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {}, "session_id": "s1", "cwd": repo},
+        ]:
+            self.assertEqual(run_hook(local, payload)[1].strip(), "", payload["hook_event_name"])
+
+
+
+
+class CommitSafetyTests(unittest.TestCase):
+    def test_commit_outside_the_session_folder_is_not_reviewed(self):
+        outside = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", outside])
+        # A repo whose test command would leave a marker if it ever ran.
+        marker = os.path.join(outside, "ran")
+        json.dump({"test": "touch %s" % marker, "reviewer": "nobody"}, open(os.path.join(outside, ".llm-review.json"), "w"))
+        open(os.path.join(outside, "x.py"), "w").write("x = 1\n")
+        session = tempfile.mkdtemp()
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "s2", "cwd": session,
+                   "tool_input": {"command": "cd %s && git add -A && git commit -m x" % outside}}
+        code, out = run_hook("http://127.0.0.1:11436", payload)
+        self.assertEqual((code, out.strip()), (0, ""))
+        self.assertFalse(os.path.exists(marker), "a test command from another repo must never run")
+
+
 if __name__ == "__main__":
     unittest.main()
